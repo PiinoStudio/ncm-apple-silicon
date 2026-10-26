@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.DS_Store
+
+# Checkpoint weights & large datasets (auto-downloaded via download_assets.py)
+artifacts/
+data/
+external/ncm/
+
+# Cache directories
+.cache/
+.pytest_cache/
