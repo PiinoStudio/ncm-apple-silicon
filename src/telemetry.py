@@ -10,6 +10,7 @@ import psutil
 import torch
 from rich.console import Console
 from rich.table import Table
+from .physical_profiler import PhysicalHardwareProfiler
 
 
 def get_vm_stat() -> Dict[str, Optional[int]]:
@@ -61,6 +62,11 @@ class TelemetryRecord:
     swap_pageouts_delta: int
     swapouts_delta: int = 0
     effective_tok_s: float = 0.0
+    avg_soc_power_w: float = 0.0
+    peak_soc_power_w: float = 0.0
+    total_energy_j: float = 0.0
+    joules_per_token: float = 0.0
+    peak_gpu_active_pct: float = 0.0
     details: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -81,6 +87,8 @@ class TelemetryContext:
         self.nfe: int = 0
         self.generated_tokens: int = 0
         self.details: str = ""
+        self.profiler = PhysicalHardwareProfiler(sample_interval_ms=100)
+        self.phys_metrics: Dict[str, Any] = {}
 
     def __enter__(self):
         gc.collect()
@@ -88,6 +96,7 @@ class TelemetryContext:
             torch.mps.empty_cache()
         self.start_vm = get_vm_stat()
         self.peak_ram = get_peak_memory_gb()
+        self.profiler.start()
         self.start_time = time.perf_counter()
         return self
 
@@ -101,6 +110,7 @@ class TelemetryContext:
         if torch.backends.mps.is_available():
             torch.mps.synchronize()
         self.end_time = time.perf_counter()
+        self.phys_metrics = self.profiler.stop()
         cur_mem = get_peak_memory_gb()
         if cur_mem > self.peak_ram:
             self.peak_ram = cur_mem
@@ -121,6 +131,12 @@ class TelemetryContext:
         est_bw = self.nfe * self.model_size_gb
         gb_per_tok = (est_bw / self.generated_tokens) if self.generated_tokens > 0 else 0.0
 
+        avg_power = self.phys_metrics.get("avg_soc_power_w", 0.0)
+        peak_power = self.phys_metrics.get("peak_soc_power_w", 0.0)
+        total_energy = self.phys_metrics.get("total_energy_joules", 0.0)
+        j_per_tok = (total_energy / self.generated_tokens) if self.generated_tokens > 0 else 0.0
+        peak_gpu = self.phys_metrics.get("peak_gpu_active_pct", 0.0)
+
         return TelemetryRecord(
             mode=self.mode,
             scenario_name=self.scenario_name,
@@ -135,6 +151,12 @@ class TelemetryContext:
             peak_ram_gb=self.peak_ram,
             swap_pageouts_delta=pageouts_delta,
             swapouts_delta=swapouts_delta,
+            effective_tok_s=self.effective_tok_s if hasattr(self, "effective_tok_s") else 0.0,
+            avg_soc_power_w=avg_power,
+            peak_soc_power_w=peak_power,
+            total_energy_j=total_energy,
+            joules_per_token=j_per_tok,
+            peak_gpu_active_pct=peak_gpu,
             details=self.details
         )
 
@@ -146,18 +168,25 @@ def print_telemetry_table(records: list[TelemetryRecord], console: Optional[Cons
     table = Table(title="Apple Silicon M5 Pro - NCM vs Autoregressive LLM Benchmark Suite", header_style="bold magenta")
     table.add_column("Benchmark Modus", style="cyan", no_wrap=True)
     table.add_column("Szenario / Modell", style="green")
-    table.add_column("NFE (Passes)", justify="right", style="yellow")
+    table.add_column("NFE", justify="right", style="yellow")
     table.add_column("Tokens", justify="right")
     table.add_column("Dauer (s)", justify="right", style="bold")
-    table.add_column("Tokens/s", justify="right")
-    table.add_column("Theor. Weight Read* (GB)", justify="right", style="bold red")
-    table.add_column("GB / Token*", justify="right", style="bold yellow")
+    table.add_column("Tok/s", justify="right")
+    table.add_column("Theor. Read* (GB)", justify="right", style="bold red")
+    table.add_column("GB / Tok*", justify="right", style="bold yellow")
+    table.add_column("Ø Power (W)**", justify="right", style="cyan")
+    table.add_column("Energie (J)**", justify="right", style="bold green")
+    table.add_column("Peak GPU %**", justify="right", style="magenta")
     table.add_column("Peak RAM (GB)", justify="right", style="blue")
     table.add_column("Swap & Pageouts", justify="right", style="bold green")
 
     for r in records:
         swap_str = f"[bold green]0 / 0[/bold green]" if (r.swap_pageouts_delta == 0 and r.swapouts_delta == 0) else f"[bold red]+{r.swap_pageouts_delta} / +{r.swapouts_delta}[/bold red]"
         tok_speed_str = f"{r.tokens_per_sec:.1f}" if r.effective_tok_s <= 0 else f"{r.tokens_per_sec:.1f} ({r.effective_tok_s:.1f} eff.)"
+        power_str = f"{r.avg_soc_power_w:.1f} W" if r.avg_soc_power_w > 0 else "-"
+        energy_str = f"{r.total_energy_j:.1f} J" if r.total_energy_j > 0 else "-"
+        gpu_str = f"{r.peak_gpu_active_pct:.1f}%" if r.peak_gpu_active_pct > 0 else "-"
+
         table.add_row(
             r.mode,
             r.scenario_name,
@@ -166,12 +195,16 @@ def print_telemetry_table(records: list[TelemetryRecord], console: Optional[Cons
             f"{r.wall_time_s:.2f}s",
             tok_speed_str,
             f"{r.est_bandwidth_gb:.2f} GB",
-            f"{r.gb_per_token:.4f} GB/tok",
+            f"{r.gb_per_token:.4f}",
+            power_str,
+            energy_str,
+            gpu_str,
             f"{r.peak_ram_gb:.2f} GB",
             swap_str
         )
 
     console.print()
     console.print(table)
-    console.print("[dim]* Hinweis: 'Theor. Weight Read' ist das analytische Streaming-Modell (NFE x Modellgröße in RAM), keine physikalische Bus-Messung per Hardware-Counter.[/dim]")
+    console.print("[dim]* 'Theor. Read' = analytisches Streaming-Modell (NFE x Modellgröße in RAM).[/dim]")
+    console.print("[dim]** 'Ø Power', 'Energie' & 'Peak GPU %' = physische Hardware-Telemetrie über Apple Silicon SoC-Sensoren (powermetrics).[/dim]")
     console.print()

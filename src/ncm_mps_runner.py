@@ -160,7 +160,7 @@ class NCMRunner:
             top_p=top_p,
             cfg_scale=cfg_scale
         )
-        if self.device.type == "mps":
+        if str(self.device) == "mps" or (hasattr(self.device, "type") and self.device.type == "mps"):
             torch.mps.synchronize()
         t_gen_done = time.perf_counter()
 
@@ -176,7 +176,7 @@ class NCMRunner:
             if on_level_callback is not None:
                 on_level_callback(lvl_idx, len(z_levels), lvl_text, z.shape[1])
 
-        if self.device.type == "mps":
+        if str(self.device) == "mps" or (hasattr(self.device, "type") and self.device.type == "mps"):
             torch.mps.synchronize()
         t_decode_done = time.perf_counter()
 
