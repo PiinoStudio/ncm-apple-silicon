@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Test script to compare physical hardware metrics (powermetrics)
-between Autoregressive Baseline and NCM Fast on identical XSum task.
-Runs a 5-pass benchmark loop to allow high-frequency physical sampling.
+Hardware Telemetry Comparison via powermetrics on Apple Silicon M5 Pro:
+Compares:
+  1. Autoregressive Baseline (Qwen2.5-0.5B FP16)
+  2. NCM Fast (Naive MPS Port, Eager)
+  3. NCM Fast (Systems-Optimized: Prefix KV-Cache + Native GPU Matrix Interp + Single-Pass Decode)
 """
 
 import os
@@ -62,67 +64,102 @@ def run():
         "task": f"XSum ({NUM_ITER}x48 tok)",
         "passes": 48 * NUM_ITER,
         "tokens": total_tokens,
+        "bpe_tokens": total_tokens,
         "time_s": t_ar,
+        "throughput_bpe": total_tokens / max(t_ar, 1e-6),
         "avg_power_w": ar_phys['avg_soc_power_w'],
         "peak_power_w": ar_phys['peak_soc_power_w'],
         "total_energy_j": ar_phys['total_energy_joules'],
-        "joules_per_token": ar_phys['total_energy_joules'] / max(total_tokens, 1),
-        "avg_gpu_active": ar_phys['avg_gpu_active_pct'],
+        "joules_per_bpe": ar_phys['total_energy_joules'] / max(total_tokens, 1),
         "peak_gpu_active": ar_phys['peak_gpu_active_pct']
     })
 
-    # 2. NCM Fast (48 positions x 5 iterations = 240 positions total)
-    console.print(f"\n[yellow]2. Profiling Next-Concept Modeling ({NUM_ITER}x 9 levels = {NUM_ITER*48} positions total)...[/yellow]")
-    ncm_runner = NCMRunner(checkpoint_dir="artifacts/xsum", device="mps")
-    ncm_profiler = PhysicalHardwareProfiler(sample_interval_ms=50)
+    # 2. NCM Fast - Naive MPS Port (Eager path, CPU-fallback interpolate, 9x decode)
+    console.print(f"\n[yellow]2. Profiling NCM Fast (Naive MPS Port, Eager, {NUM_ITER}x 9 levels)...[/yellow]")
+    ncm_naive_runner = NCMRunner(checkpoint_dir="artifacts/xsum", device="mps")
+    ncm_naive_profiler = PhysicalHardwareProfiler(sample_interval_ms=50)
 
-    ncm_profiler.start()
+    ncm_naive_profiler.start()
     t0 = time.perf_counter()
-    total_ncm_pos = 0
+    total_naive_pos = 0
     for i in range(NUM_ITER):
-        res = ncm_runner.generate_coarse_to_fine(raw_input=passage)
-        total_ncm_pos += res['generated_tokens']
-    t_ncm = time.perf_counter() - t0
-    ncm_phys = ncm_profiler.stop()
-    ncm_runner.cleanup()
+        res = ncm_naive_runner.generate_coarse_to_fine(raw_input=passage, use_optimizations=False)
+        total_naive_pos += res['generated_tokens']
+    t_ncm_naive = time.perf_counter() - t0
+    ncm_naive_phys = ncm_naive_profiler.stop()
+    ncm_naive_runner.cleanup()
 
-    console.print(f"  ✓ NCM Done: {total_ncm_pos} positions in {t_ncm:.2f}s ({ncm_phys['sample_count']} physical samples).")
+    naive_bpe = int(total_naive_pos * 0.583)
+    console.print(f"  ✓ Naive NCM Done: {total_naive_pos} pos ({naive_bpe} BPE) in {t_ncm_naive:.2f}s ({ncm_naive_phys['sample_count']} samples).")
     results.append({
-        "name": f"NCM Fast (Coarse-to-Fine)",
+        "name": f"NCM Fast (Naive Eager Port)",
         "task": f"XSum ({NUM_ITER}x48 pos)",
         "passes": 9 * NUM_ITER,
-        "tokens": total_ncm_pos,
-        "time_s": t_ncm,
-        "avg_power_w": ncm_phys['avg_soc_power_w'],
-        "peak_power_w": ncm_phys['peak_soc_power_w'],
-        "total_energy_j": ncm_phys['total_energy_joules'],
-        "joules_per_token": ncm_phys['total_energy_joules'] / max(total_ncm_pos, 1),
-        "avg_gpu_active": ncm_phys['avg_gpu_active_pct'],
-        "peak_gpu_active": ncm_phys['peak_gpu_active_pct']
+        "tokens": total_naive_pos,
+        "bpe_tokens": naive_bpe,
+        "time_s": t_ncm_naive,
+        "throughput_bpe": naive_bpe / max(t_ncm_naive, 1e-6),
+        "avg_power_w": ncm_naive_phys['avg_soc_power_w'],
+        "peak_power_w": ncm_naive_phys['peak_soc_power_w'],
+        "total_energy_j": ncm_naive_phys['total_energy_joules'],
+        "joules_per_bpe": ncm_naive_phys['total_energy_joules'] / max(naive_bpe, 1),
+        "peak_gpu_active": ncm_naive_phys['peak_gpu_active_pct']
+    })
+
+    # 3. NCM Fast - Systems-Optimized (Prefix KV-Cache, GPU Matrix Interp, Single-Pass Decode)
+    console.print(f"\n[yellow]3. Profiling NCM Fast (Systems-Optimized Co-Design, {NUM_ITER}x 9 levels)...[/yellow]")
+    ncm_opt_runner = NCMRunner(checkpoint_dir="artifacts/xsum", device="mps")
+    ncm_opt_profiler = PhysicalHardwareProfiler(sample_interval_ms=50)
+
+    ncm_opt_profiler.start()
+    t0 = time.perf_counter()
+    total_opt_pos = 0
+    for i in range(NUM_ITER):
+        res = ncm_opt_runner.generate_coarse_to_fine(raw_input=passage, use_optimizations=True)
+        total_opt_pos += res['generated_tokens']
+    t_ncm_opt = time.perf_counter() - t0
+    ncm_opt_phys = ncm_opt_profiler.stop()
+    ncm_opt_runner.cleanup()
+
+    opt_bpe = int(total_opt_pos * 0.583)
+    console.print(f"  ✓ Optimized NCM Done: {total_opt_pos} pos ({opt_bpe} BPE) in {t_ncm_opt:.2f}s ({ncm_opt_phys['sample_count']} samples).")
+    results.append({
+        "name": f"NCM Fast (Systems-Optimized)",
+        "task": f"XSum ({NUM_ITER}x48 pos)",
+        "passes": 9 * NUM_ITER,
+        "tokens": total_opt_pos,
+        "bpe_tokens": opt_bpe,
+        "time_s": t_ncm_opt,
+        "throughput_bpe": opt_bpe / max(t_ncm_opt, 1e-6),
+        "avg_power_w": ncm_opt_phys['avg_soc_power_w'],
+        "peak_power_w": ncm_opt_phys['peak_soc_power_w'],
+        "total_energy_j": ncm_opt_phys['total_energy_joules'],
+        "joules_per_bpe": ncm_opt_phys['total_energy_joules'] / max(opt_bpe, 1),
+        "peak_gpu_active": ncm_opt_phys['peak_gpu_active_pct']
     })
 
     # Summary Table
     table = Table(title="Apple Silicon M5 Pro - Physische Hardware-Telemetrie (powermetrics)", border_style="bright_blue")
     table.add_column("Modell / Architektur", style="bold white")
     table.add_column("Passes", justify="right")
-    table.add_column("Tokens", justify="right")
     table.add_column("Dauer (s)", justify="right")
-    table.add_column("Ø SoC Power (W)", justify="right", style="cyan")
-    table.add_column("Peak SoC Power (W)", justify="right")
-    table.add_column("Gesamt-Energie (J)", justify="right", style="bold yellow")
-    table.add_column("J / Token", justify="right", style="bold green")
+    table.add_column("BPE Durchsatz", justify="right", style="bold cyan")
+    table.add_column("Ø SoC Power", justify="right")
+    table.add_column("Peak SoC Power", justify="right")
+    table.add_column("Gesamt-Energie", justify="right", style="yellow")
+    table.add_column("J / BPE-Token", justify="right", style="bold green")
     table.add_column("Peak GPU %", justify="right", style="magenta")
 
     for r in results:
         table.add_row(
             r["name"],
             str(r["passes"]),
-            str(r["tokens"]),
             f"{r['time_s']:.2f}s",
+            f"{r['throughput_bpe']:.1f} tok/s",
             f"{r['avg_power_w']:.2f} W",
             f"{r['peak_power_w']:.2f} W",
             f"{r['total_energy_j']:.2f} J",
-            f"{r['joules_per_token']:.4f} J/tok",
+            f"{r['joules_per_bpe']:.4f} J/tok",
             f"{r['peak_gpu_active']:.1f}%"
         )
 
