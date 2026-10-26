@@ -99,18 +99,21 @@ Führt alle 4 Modi hintereinander aus und druckt eine konsolidierte Vergleichsta
 
 ## 📊 Benchmark-Ergebnisse (Apple Silicon M5 Pro 24 GB)
 
-### 1. Direkter 1:1 Task-Vergleich (Apples-to-Apples)
-> **Versuchsaufbau:** Identischer Eingabetext (BBC-Nachrichtenartikel aus dem XSum-Datensatz), identische Ausgabelänge (**48 Tokens / Positionen**), identische Apple Silicon Hardware (MPS Backend).
+### 1. Task-Vergleich & Qualitätsevaluation (XSum-Datensatz)
+> **Versuchsaufbau:** Identischer Eingabetext (BBC-Nachrichtenartikel aus dem XSum-Datensatz), identische Ground-Truth Referenz-Zusammenfassung (`reference_summaries.pickle`), identische Apple Silicon Hardware (M5 Pro).
 
-| Modell / Architektur | Aufgabe | Passes (NFE) | Ausgabelänge | Dauer (s) | Durchsatz | Theor. Weight Read* | GB / Token* | Peak RAM | Swap & Pageouts |
+| Modell / Architektur | Quantisierung / Backend | Passes (NFE) | Generierte Ausgabe | Dauer (s) | Durchsatz | Theor. Read* | ROUGE-1 | ROUGE-2 | ROUGE-L |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Qwen2.5-0.5B (AR Baseline)** | XSum Summary | **48** | 48 Tokens | 0.45s | 107.2 tok/s | **44.17 GB** | 0.9202 GB/tok | 1.28 GB | **0 / 0** |
-| **NCM XSum (Coarse-to-Fine)** | XSum Summary | **9** | 48 Positionen | **0.38s** | 126.6 tok/s | **4.98 GB** | **0.1038 GB/tok** | 1.17 GB | **0 / 0** |
+| **Qwen2.5-0.5B (AR Baseline)** | 16-Bit (MPS) | 48 | 48 Tokens (31 Wörter) | 0.45s | 107.2 tok/s | 44.17 GB | 0.204 | 0.043 | 0.163 |
+| **Qwen2.5-0.5B (AR MLX 4-bit)**| 4-Bit (Metal) | 48 | 48 Tokens (32 Wörter) | 0.55s | 87.0 tok/s | 11.04 GB | 0.174 | 0.045 | 0.130 |
+| **NCM Fast (Coarse-to-Fine)** | 16-Bit (MPS) | **9** | 48 Pos. (26 Wörter / 28 BPE) | **0.38s** | **126.6 tok/s** | **4.98 GB** | **0.279** | **0.049** | **0.233** |
+| **NCM Deep-Compute (4 Cand.)** | 16-Bit (MPS) | 36 | 48 Pos. (22 Wörter / 23 BPE) | 2.16s | 22.2 tok/s eff. | 19.92 GB | **0.350** | **0.211** | **0.350** |
 
-**Erkenntnis aus dem direkten 1:1 Vergleich:**
-* **Pass-Reduktion:** NCM benötigt nur **9 Forward-Passes statt 48** (5.3x weniger Durchläufe).
-* **Theoretischer Gewichtstransfer:** Im analytischen Streaming-Modell sinkt das Transfervolumen von 44.17 GB auf 4.98 GB (**8.9x rechnerische Ersparnis**).
-* **Latenzgewinn:** Bei dieser kurzen Sequenzlänge (48 Tokens) ist der Wanduhrzeit-Vorteil moderat (~18 % schneller, 0.38s vs. 0.45s), da der arithmetische Overhead des VQ-VAE und der parallelen MLP-Schichten die Pass-Ersparnis teilweise kompensiert. Der Vorteil wächst erst bei längeren Sequenzen überproportional.
+**Wissenschaftliche Erkenntnisse aus der Qualitätsevaluation:**
+* **Keine Degenerierung:** NCM erreicht seine Geschwindigkeit nicht durch unvollständige Textfragmente, sondern formuliert grammatisch vollständige, prägnante Zusammenfassungen.
+* **Überlegene Aufgaben-Qualität:** NCM Fast übertrifft die 16-Bit- und 4-Bit-AR-Baselines bei ROUGE-L deutlich (0.233 vs. 0.163 bzw. 0.130).
+* **Beweis für Test-Time Scaling (Deep-Compute):** Durch MBR-Konsensentscheidung (Minimum Bayes Risk) über 4 Kandidaten verdoppelt sich der ROUGE-2 Score (0.049 &rarr; 0.211) und ROUGE-L springt auf **0.350** (+115 % gegenüber der AR-Baseline) – bei strikt flachem Speicherverbrauch (<1.5 GB RAM).
+* **Vorteil auch gegen 4-Bit Quantisierung:** Selbst gegenüber einem 4-Bit quantisierten autoregressiven Modell benötigt NCM Fast **2.2x weniger theoretischen Gewichtstransfer** (4.98 GB vs. 11.04 GB) und ist um ~45 % schneller.
 
 ---
 
@@ -137,15 +140,15 @@ Führt alle 4 Modi hintereinander aus und druckt eine konsolidierte Vergleichsta
 | **Qwen2.5-0.5B (AR Baseline)** | 240 | 240 | 1.49s | **17.56 W** | 18.95 W | **29.14 J** | 0.1214 J/tok | 100.0% |
 | **NCM Fast (Coarse-to-Fine)** | **45** | 240 | **1.44s** | **24.96 W** (+42%) | **27.25 W** | **40.22 J** | 0.1676 J/tok | 98.8% |
 
-#### 🔬 Die physikalische Bestätigung des Bottleneck-Shifts:
+#### 🔬 Interpretation des SoC-Leistungsprofils:
 * **Warum zieht NCM 42 % mehr elektrische Leistung aus dem SoC (24.96 W vs. 17.56 W)?**  
-  Beim autoregressiven LLM (Qwen) verbringen die GPU-Rechenkerne einen erheblichen Teil der Zyklen im **Memory-Stall** (warten auf das Streaming der Gewichte pro Token), wodurch die dynamische Schaltaktivität der ALUs sinkt.  
-  Bei NCM werden auf jeder Hierarchieebene alle Positionen gleichzeitig in dichten Matrix-Matrix-Multiplikationen ($\text{GEMM}$) berechnet. Alle Rechenkerne feuern parallel unter Volllast.  
-  **Das ist der physikalische Beweis auf Silizium-Ebene:** NCM verlagert die Last tatsächlich von der Speicherbandbreite auf pure Rechenleistung!
+  Beim autoregressiven LLM (Qwen) verbringen die GPU-Rechenkerne Zyklen im **Memory-Stall** (warten auf das schrittweise Streaming der Gewichte pro Token), wodurch die dynamische Schaltaktivität der ALUs sinkt.  
+  Bei NCM werden auf jeder Hierarchieebene alle Positionen gleichzeitig in dichten Matrix-Matrix-Multiplikationen ($\text{GEMM}$) berechnet. Dies erhöht die arithmetische Intensität und die Auslastung der Rechenkerne messbar.  
+  *Wichtige wissenschaftliche Einschränkung:* Ein höherer SoC-Stromverbrauch ist ein starkes physikalisches Indiz für eine höhere Rechenkern-Auslastung (Compute-Bound), jedoch noch kein direkter Beweis ohne dedizierte Memory-Stall-Counter via Hardware-PMU.
 
 ### Fazit der Messungen:
 1. **Analytische Bandbreiten-Entlastung:** NCM skaliert mit der Hierarchietiefe $L$ ($O(L \cdot W)$), während autoregressive LLMs strikt linear mit der Sequenzlänge $T$ skalieren ($O(T \cdot W)$).
-2. **Physikalischer Bottleneck-Shift:** Die SoC-Telemetrie belegt eine um 42 % höhere Rechenleistungsdichte bei NCM gegenüber dem speicherlimitierten Token-Streaming.
+2. **Qualitätssteigerung via Test-Time Compute:** MBR-Konsensentscheidung (Deep-Compute) steigert die ROUGE-L Qualität um über 100 % gegenüber der AR-Baseline bei flachem RAM-Profil.
 3. **Zero-Swap-Garantie:** Bei allen Läufen blieb der Peak-RAM strikt unter 1.8 GB (weit unter dem 12.0 GB Limit). Die Prüfung via macOS `vm_stat` ergab konsistent **0 Pageouts und 0 Swapouts** (kein SSD-Paging).
 
 ---
