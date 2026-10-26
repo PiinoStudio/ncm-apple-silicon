@@ -109,3 +109,18 @@ Führt alle 4 Modi hintereinander aus und druckt eine konsolidierte Vergleichsta
 ### Fazit:
 1. **Speicherbandbreiten-Entlastung:** NCM reduziert den Speichertransfer von **471 GB** auf **4.98 GB** – ein massiver Effizienzsprung auf Unified Memory Architekturen.
 2. **Stabilität & Zero-Swap:** Selbst bei mehrfacher Test-Time-Skalierung im Deep-Compute-Modus blieb der RAM-Footprint stets bei < 1.8 GB, und `vm_stat` registrierte konsistent **0 Pageouts**.
+
+---
+
+## 🔍 Der Realitäts-Check: Wissenschaftliche Einordnung & Grenzen
+
+So bahnbrechend der hardware-technische Effizienzsprung ist, so wichtig ist eine ehrliche Einordnung der aktuellen Grenzen:
+
+1. **Kein magischer Ersatz für allgemeine Chatbots (Stand heute):**  
+   NCM ist ein fundamentales neues Modellierungs-Paradigma aus Stanford (Oktober 2026). Es existieren spezialisierte Gewichte für Summarization (XSum), Translation (WMT) und Sudoku. Es gibt noch kein 70B-General-Purpose-NCM-Modell mit jahrelangem Instruction Tuning, RLHF, Function-Calling oder Tool-Use.
+2. **Das VQ-VAE-Generalisierungsproblem:**  
+   LLMs nutzen BPE-Tokenisierung (verlustfrei, universell für Code, LaTeX, Kauderwelsch). NCM nutzt einen *Multiscale Residual VQ-VAE*, der Text in diskrete Vektor-Codebooks komprimiert. Einen VQ-VAE zu trainieren, der das gesamte, chaotische Web ohne Rekonstruktionsartefakte abbildet, ist eine enorme offene Forschungsaufgabe.
+3. **Semantisches Konzept-Drafting vs. mathematisches Speculative Decoding:**  
+   Im klassischen Speculative Decoding (Leviathan et al.) rät ein Draft-Modell Tokens, die exakt per Rejection Sampling verifiziert werden. Unser hybrider Ansatz nutzt NCM als **semantischen Konzept-Planer**, dessen Entwurf vom LLM im schnellen parallelen Prefill redaktionell ausformuliert wird. Dies ist hochgradig effektiv für strukturierte Aufgaben, aber kein bit-genauer Drop-in-Ersatz für Standard-Sampler.
+
+> **Zusammenfassung:** NCM löst das fundamentale Flaschenhals-Problem von lokaler Edge-Inferenz auf Hardware-Ebene. Bis daraus ein allumfassendes Produktiv-System wird, muss die Modellierungs- und Tokenizer-Skalierung im Open-Source-Ökosystem nachziehen.
