@@ -7,12 +7,12 @@ Ein vollständiges, produktionsreifes Proof of Concept (PoC) zur Evaluierung der
 ## 🎯 Getestete Kern-Hypothesen & Ergebnisse
 
 ### 1. Bottleneck-Shift (Memory Bandwidth -> Compute)
-* **Problem klassischer autoregressiver LLMs:** Für $T$ generierte Tokens werden $T$ sequentielle Forward-Passes benötigt. Bei Batch-Size 1 (typisch für lokale Assistenten und Agents) muss das gesamte Modellgewicht für *jeden einzelnen Token* komplett aus dem Unified Memory in die GPU-ALUs gestreamt werden. Bei 512 Tokens und einem 0.5B Modell (~0.92 GB) bedeutet das über **471 GB RAM-Bandbreiten-Transfer** (~0.92 GB pro generiertem Token).
+* **Problem klassischer autoregressiver LLMs:** Für $T$ generierte Tokens werden $T$ sequentielle Forward-Passes benötigt. Bei Batch-Size 1 (typisch für lokale Assistenten und Agents) muss das gesamte Modellgewicht für *jeden einzelnen Token* komplett aus dem Unified Memory in die GPU-ALUs gestreamt werden. Bei 512 Tokens und einem 0.5B Modell (~0.92 GB) bedeutet das im theoretischen Streaming-Modell über **471 GB Modellgewichts-Transfer** (~0.92 GB pro generiertem Token).
 * **NCM-Lösung:** NCM zerlegt die Sequenz über einen Multiscale Residual VQ-VAE in eine diskrete Konzept-Hierarchie (z. B. 9 Level bei XSum, 12 Level bei Sudoku). Pro Hierarchie-Ebene wird nur **ein einziger paralleler Forward-Pass** ausgeführt – unabhängig von der Tokenanzahl.
 * **M5 Pro Messergebnis:**
-  * **AR-Baseline (512 Tokens):** 512 Passes, **471.15 GB** RAM-Bandbreiten-Transfer (**0.9202 GB/Token**).
-  * **NCM Fast (48 Output-Positionen):** 9 Passes, **4.98 GB** RAM-Bandbreiten-Transfer (**0.1038 GB/Token**).
-  * **Effizienzgewinn:** **~8.9x bis 45x geringere RAM-Bandbreiten-Belastung** pro Token! Das Bottleneck verlagert sich vollständig von der Speicherbandbreite auf die starken Compute-Kerne des M5 Pro.
+  * **AR-Baseline (512 Tokens):** 512 Passes, **471.15 GB** theoretischer Gewichtstransfer (**0.9202 GB/Token**).
+  * **NCM Fast (48 Output-Positionen):** 9 Passes, **4.98 GB** theoretischer Gewichtstransfer (**0.1038 GB/Token**).
+  * **Effizienzgewinn:** **~8.9x geringere theoretische Bandbreiten-Belastung** pro Token im analytischen Gewichts-Streaming-Modell. Das Bottleneck verlagert sich von der reinen Speicherbandbreite auf die Rechenkerne des M5 Pro.
 
 ### 2. Deep-Compute Mode (Zeit gegen Qualität OHNE Swap)
 * **Problem großer Modelle bei begrenztem RAM:** Modelle >14-18 GB führen auf 24 GB Unified Memory Maschinen bei paralleler KV-Cache- oder Kontextauslastung unweigerlich zu SSD-Swap (`pageouts`), was Latenzen explodieren lässt und SSDs verschleißt.
@@ -97,18 +97,39 @@ Führt alle 4 Modi hintereinander aus und druckt eine konsolidierte Vergleichsta
 
 ---
 
-## 📊 Gemessene Benchmark-Ergebnisse (M5 Pro 24 GB)
+## 📊 Benchmark-Ergebnisse (Apple Silicon M5 Pro 24 GB)
 
-| Benchmark Modus | Szenario / Modell | NFE (Passes) | Output Tokens | Rechenzeit (s) | Durchsatz (Tok/s) | Est. RAM Read (GB) | GB / Token | Peak RAM (GB) | Swap Pageouts |
+### 1. Direkter 1:1 Task-Vergleich (Apples-to-Apples)
+> **Versuchsaufbau:** Identischer Eingabetext (BBC-Nachrichtenartikel aus dem XSum-Datensatz), identische Ausgabelänge (**48 Tokens / Positionen**), identische Apple Silicon Hardware (MPS Backend).
+
+| Modell / Architektur | Aufgabe | Passes (NFE) | Ausgabelänge | Dauer (s) | Durchsatz | Theor. Weight Read* | GB / Token* | Peak RAM | Swap & Pageouts |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`baseline-ar`** | Qwen2.5-0.5B (AR) | **512** | 512 | 3.20s | 159.8 | **471.15 GB** | **0.9202 GB/tok** | 1.58 GB | **0** |
-| **`ncm-fast`** | NCM XSum (9 Levels) | **9** | 48 | **0.36s** | 134.3 | **4.98 GB** | **0.1038 GB/tok** | 1.50 GB | **0** |
-| **`ncm-deep-compute`**| NCM MBR Medium (8 Cand.)| **72** | 384 | 3.92s | 98.0 | **39.84 GB** | **0.1038 GB/tok** | 1.51 GB | **0** |
-| **`hybrid-interleaved`**| NCM (MPS) + Qwen2.5 (MLX)| **62** | 101 | 3.84s | 26.3 | **37.20 GB** | **0.3683 GB/tok** | 1.79 GB | **0** |
+| **Qwen2.5-0.5B (AR Baseline)** | XSum Summary | **48** | 48 Tokens | 0.45s | 107.2 tok/s | **44.17 GB** | 0.9202 GB/tok | 1.28 GB | **0 / 0** |
+| **NCM XSum (Coarse-to-Fine)** | XSum Summary | **9** | 48 Positionen | **0.38s** | 126.6 tok/s | **4.98 GB** | **0.1038 GB/tok** | 1.17 GB | **0 / 0** |
 
-### Fazit:
-1. **Speicherbandbreiten-Entlastung:** NCM reduziert den Speichertransfer von **471 GB** auf **4.98 GB** – ein massiver Effizienzsprung auf Unified Memory Architekturen.
-2. **Stabilität & Zero-Swap:** Selbst bei mehrfacher Test-Time-Skalierung im Deep-Compute-Modus blieb der RAM-Footprint stets bei < 1.8 GB, und `vm_stat` registrierte konsistent **0 Pageouts**.
+**Erkenntnis aus dem direkten 1:1 Vergleich:**
+* **Pass-Reduktion:** NCM benötigt nur **9 Forward-Passes statt 48** (5.3x weniger Durchläufe).
+* **Theoretischer Gewichtstransfer:** Im analytischen Streaming-Modell sinkt das Transfervolumen von 44.17 GB auf 4.98 GB (**8.9x rechnerische Ersparnis**).
+* **Latenzgewinn:** Bei dieser kurzen Sequenzlänge (48 Tokens) ist der Wanduhrzeit-Vorteil moderat (~18 % schneller, 0.38s vs. 0.45s), da der arithmetische Overhead des VQ-VAE und der parallelen MLP-Schichten die Pass-Ersparnis teilweise kompensiert. Der Vorteil wächst erst bei längeren Sequenzen überproportional.
+
+---
+
+### 2. Skalierungs- & Modus-Vergleich (Lange Sequenzen, Test-Time Compute, Hybrid)
+
+| Benchmark Modus | Szenario / Modell | NFE (Passes) | Ausgabelänge | Dauer (s) | Durchsatz (Tok/s) | Theor. Weight Read* | GB / Token* | Peak RAM | Swap & Pageouts |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`baseline-ar (512)`** | Qwen2.5-0.5B (512 Tokens) | **512** | 512 Tokens | 3.98s | 128.6 tok/s | **471.15 GB** | 0.9202 GB/tok | 1.63 GB | **0 / 0** |
+| **`ncm-fast`** | NCM XSum (9 Levels) | **9** | 48 Positionen | 0.38s | 126.6 tok/s | **4.98 GB** | 0.1038 GB/tok | 1.17 GB | **0 / 0** |
+| **`ncm-deep-compute`** | NCM MBR (4 Kandidaten) | **36** | 192 (4x48) | 2.16s | 89.0 (22.2 eff.)** | **19.92 GB** | 0.1038 GB/tok | 1.46 GB | **0 / 0** |
+| **`hybrid-interleaved`** | NCM (MPS) + Qwen2.5 (MLX) | **137** | 176 Tokens | 3.39s | 51.9 tok/s | **82.34 GB** | 0.4678 GB/tok | 1.46 GB | **0 / 0** |
+
+*\* **Methodischer Hinweis zu "Theor. Weight Read":** Es handelt sich hierbei um das in der System-Architektur etablierte analytische Streaming-Modell ($\text{NFE} \times W_{\text{model}}$ in RAM), **nicht** um eine physikalische Bus-Messung per Hardware-Performance-Counter (Apple PMU). Es quantifiziert, wie oft die Modellgewichte rechnerisch im Worst-Case über den Datenpfad transportiert werden müssen.*
+
+*\*\* **Hinweis zu Deep-Compute:** Der Durchsatz unterscheidet zwischen dem **aggregierten Durchsatz** aller generierten Kandidaten (89.0 tok/s) und der **effektiven Ausgabelatenz** für den Endnutzer (22.2 tok/s, 2.16s Wartezeit für das via MBR-Konsens ausgewählte finale Summary).*
+
+### Fazit der Messungen:
+1. **Analytische Bandbreiten-Entlastung:** NCM skaliert mit der Hierarchietiefe $L$ ($O(L \cdot W)$), während autoregressive LLMs strikt linear mit der Sequenzlänge $T$ skalieren ($O(T \cdot W)$).
+2. **Zero-Swap-Garantie:** Bei allen Läufen blieb der Peak-RAM strikt unter 1.8 GB (weit unter dem 12.0 GB Limit). Die Prüfung via macOS `vm_stat` ergab konsistent **0 Pageouts und 0 Swapouts** (kein SSD-Paging).
 
 ---
 

@@ -14,6 +14,7 @@ import os
 import pickle
 import sys
 import time
+from typing import Optional
 
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 import torch
@@ -39,8 +40,10 @@ def load_test_sample(task: str = "xsum") -> tuple[any, str]:
         data_path = os.path.join(root, "data", "xsum", "passages.pickle")
         passages = pickle.load(open(data_path, "rb"))
         item = passages[0]
-        # XSum raw tokens can be decoded or excerpted
-        text = "The Welsh government has pledged to increase emergency accommodation beds across local councils amid rising homelessness."
+        # Decode the actual article from XSum tokens
+        from transformers import AutoTokenizer
+        tok = AutoTokenizer.from_pretrained("gpt2")
+        text = tok.decode(item[:250])
         return item, text
     elif task in ("sudoku", "sudoku-hard"):
         data_path = os.path.join(root, "data", "sudoku-hard", "puzzles.pickle")
@@ -51,15 +54,22 @@ def load_test_sample(task: str = "xsum") -> tuple[any, str]:
         raise ValueError(f"Unknown task: {task}")
 
 
-def run_baseline_ar_mode(max_tokens: int = 512, model_id: str = "Qwen/Qwen2.5-0.5B-Instruct") -> TelemetryRecord:
+def run_baseline_ar_mode(max_tokens: int = 512, model_id: str = "Qwen/Qwen2.5-0.5B-Instruct", source_passage: Optional[str] = None) -> TelemetryRecord:
     console.print(Panel.fit("[bold blue]1. Mode: Autoregressive LLM Baseline (--mode baseline-ar)[/bold blue]", border_style="blue"))
-    console.print(f"[dim]Running standard autoregressive token-by-token generation for {max_tokens} tokens...[/dim]\n")
+    console.print(f"[dim]Running standard autoregressive token-by-token generation (Max: {max_tokens} tokens)...[/dim]\n")
 
-    prompt = (
-        "Analyze the architectural trade-offs between classic token-by-token autoregressive decoding "
-        "and hierarchical coarse-to-fine generation on unified memory architectures like Apple Silicon M5 Pro. "
-        "Discuss memory bandwidth saturation versus arithmetic intensity."
-    )
+    if source_passage:
+        prompt = (
+            f"<|im_start|>user\n"
+            f"Summarize the following news article in one concise sentence:\n"
+            f"{source_passage}\n<|im_end|>\n<|im_start|>assistant\n"
+        )
+    else:
+        prompt = (
+            "Analyze the architectural trade-offs between classic token-by-token autoregressive decoding "
+            "and hierarchical coarse-to-fine generation on unified memory architectures like Apple Silicon M5 Pro. "
+            "Discuss memory bandwidth saturation versus arithmetic intensity."
+        )
 
     runner = AutoregressiveBaselineRunner(model_id=model_id, console=console)
 
@@ -76,7 +86,7 @@ def run_baseline_ar_mode(max_tokens: int = 512, model_id: str = "Qwen/Qwen2.5-0.
 
     console.print(f"\n[green]✓ Generated {res['generated_tokens']} tokens in {res['wall_time_s']:.2f}s ({res['tokens_per_sec']:.1f} tok/s)[/green]")
     console.print(f"[yellow]  NFE (Forward Passes): {res['nfe']}[/yellow] (Each token required reading {runner.model_size_gb:.2f} GB model weights)")
-    console.print(f"[red]  Est. RAM Bandwidth Transferred: {res['est_bandwidth_gb']:.2f} GB ({res['gb_per_token']:.4f} GB/tok)[/red]\n")
+    console.print(f"[red]  Theor. Weight Streaming Read: {res['est_bandwidth_gb']:.2f} GB ({res['gb_per_token']:.4f} GB/tok) [Analytisches Modell][/red]\n")
     console.print(f"[dim]Excerpt:[/dim] {res['text'][:200]}...\n")
 
     runner.cleanup()
@@ -144,8 +154,10 @@ def run_ncm_deep_compute_mode(effort: str = "medium", task: str = "xsum", max_ra
     console.print(f"  Selection: [cyan]{res['selection_method']}[/cyan]")
     console.print(f"  Best Solution: [white]{res['best_text']}[/white]\n")
 
+    rec = ctx.get_record()
+    rec.effective_tok_s = res.get("effective_tok_s", 0.0)
     runner.cleanup()
-    return ctx.get_record()
+    return rec
 
 
 def run_hybrid_mode(task: str = "xsum") -> TelemetryRecord:
@@ -191,8 +203,12 @@ def main():
 
     records: list[TelemetryRecord] = []
 
+    item, desc = load_test_sample(args.task)
+
     if args.mode in ("baseline-ar", "all"):
-        rec_ar = run_baseline_ar_mode(max_tokens=args.tokens)
+        # If tokens == 48, run 1:1 on the exact same task/passage as NCM; otherwise run general length benchmark
+        passage_to_use = desc if (args.task == "xsum" and args.tokens <= 64) else None
+        rec_ar = run_baseline_ar_mode(max_tokens=args.tokens, source_passage=passage_to_use)
         records.append(rec_ar)
 
     if args.mode in ("ncm-fast", "all"):
@@ -216,19 +232,20 @@ def main():
         ar_rec = next((r for r in records if "ar" in r.mode), records[0])
         bw_ratio = (ar_rec.gb_per_token / max(ncm_rec.gb_per_token, 1e-6))
         console.print(Panel.fit(
-            "[bold green]Hypothesen-Verifikation auf Apple Silicon M5 Pro (24 GB Unified Memory):[/bold green]\n"
-            "1. [bold yellow]Bottleneck-Shift (Memory Bandwidth -> Compute):[/bold yellow]\n"
-            f"   • AR LLM liest pro Token das gesamte Modell (~{ar_rec.gb_per_token:.4f} GB/tok).\n"
-            f"   • NCM benötigt nur eine fixe Anzahl hierarchischer Pässe (~{ncm_rec.gb_per_token:.4f} GB/tok) -> ~{bw_ratio:.1f}x weniger RAM-Bandbreiten-Traffic!\n"
-            "2. [bold yellow]Deep-Compute Mode (Zeit gegen Qualität OHNE Swap):[/bold yellow]\n"
-            f"   • Peak RAM blieb strikt unter Budget (Peak: {max(r.peak_ram_gb for r in records):.2f} GB < 14 GB).\n"
-            f"   • vm_stat Swap Pageouts Delta = {sum(r.swap_pageouts_delta for r in records)} across all runs -> 0 Bytes Disk Swapping nachgewiesen!",
-            title="Benchmark Fazit & System-Beweis", border_style="bold green"
+            "[bold green]Methodische Einordnung auf Apple Silicon M5 Pro (24 GB Unified Memory):[/bold green]\n"
+            "1. [bold yellow]Bottleneck-Shift (Analytisches Gewichtstransfer-Modell):[/bold yellow]\n"
+            f"   • AR LLM erfordert pro Token das Laden aller Gewichte (~{ar_rec.gb_per_token:.4f} GB/tok im Streaming-Modell).\n"
+            f"   • NCM benötigt nur eine fixe Anzahl hierarchischer Pässe (~{ncm_rec.gb_per_token:.4f} GB/tok) -> rechnerisch ~{bw_ratio:.1f}x weniger theoretischer Gewichtstransfer pro Position.\n"
+            f"   • Wichtig: Dies ist ein mathematisches Streaming-Modell (NFE x Weights), keine physikalische Bus-Messung.\n"
+            "2. [bold yellow]Deep-Compute Mode (Zeit gegen Qualität ohne SSD-Swap):[/bold yellow]\n"
+            f"   • Peak RAM blieb strikt unter Budget (Peak: {max(r.peak_ram_gb for r in records):.2f} GB < 12.0 GB Limit).\n"
+            f"   • macOS vm_stat Pageouts / Swapouts Delta = {sum(r.swap_pageouts_delta for r in records)} / {sum(r.swapouts_delta for r in records)} -> keine messbaren SSD-Swapouts registriert.",
+            title="Benchmark Zusammenfassung & Einordnung", border_style="bold green"
         ))
     else:
         r = records[0]
         console.print(Panel.fit(
-            f"[bold green]Lauf abgeschlossen:[/bold green] Modus: {r.mode}, NFE: {r.nfe}, Peak RAM: {r.peak_ram_gb:.2f} GB, Swap Pageouts Delta: {r.swap_pageouts_delta}",
+            f"[bold green]Lauf abgeschlossen:[/bold green] Modus: {r.mode}, NFE: {r.nfe}, Peak RAM: {r.peak_ram_gb:.2f} GB, Pageouts/Swapouts Delta: {r.swap_pageouts_delta}/{r.swapouts_delta}",
             title="Benchmark Zusammenfassung", border_style="bold green"
         ))
 

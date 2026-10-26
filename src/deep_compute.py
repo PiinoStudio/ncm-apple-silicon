@@ -179,7 +179,10 @@ class DeepComputeRunner:
             best_idx, best_text, scores = compute_mbr_consensus(candidates)
             selection_method = f"MBR ROUGE-L Consensus (Score: {scores[best_idx]:.3f})"
 
+        raw_tok_s = (self.runner.levels[-1] * len(candidates)) / max(t_total, 1e-6)
+        eff_tok_s = self.runner.levels[-1] / max(t_total, 1e-6)
         self.console.print(f"[bold green]✓ Best Candidate Selected:[/bold green] #{best_idx+1} via {selection_method}")
+        self.console.print(f"  [dim]Aggregated Throughput across {len(candidates)} candidates: {raw_tok_s:.1f} tok/s | Effective Output Latency Throughput: {eff_tok_s:.1f} tok/s[/dim]")
 
         return {
             "best_text": best_text,
@@ -190,5 +193,6 @@ class DeepComputeRunner:
             "num_candidates": len(candidates),
             "total_nfe": total_nfe,
             "total_time_s": t_total,
-            "tokens_per_sec": (self.runner.levels[-1] * len(candidates)) / max(t_total, 1e-6)
+            "tokens_per_sec": raw_tok_s,
+            "effective_tok_s": eff_tok_s
         }

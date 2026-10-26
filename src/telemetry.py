@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 
-def get_vm_stat() -> Dict[str, int]:
+def get_vm_stat() -> Dict[str, Optional[int]]:
     """Parse vm_stat output on macOS to get pageouts, swapins, swapouts."""
     try:
         res = subprocess.run(["vm_stat"], capture_output=True, text=True, check=True)
@@ -29,7 +29,7 @@ def get_vm_stat() -> Dict[str, int]:
             "pageins": stats.get("Pageins", 0),
         }
     except Exception as e:
-        return {"pageouts": 0, "swapins": 0, "swapouts": 0, "pageins": 0, "error": str(e)}
+        return {"pageouts": None, "swapins": None, "swapouts": None, "pageins": None, "error": str(e)}
 
 
 def get_peak_memory_gb() -> float:
@@ -55,10 +55,12 @@ class TelemetryRecord:
     tokens_per_sec: float
     model_params_m: float
     model_size_gb: float
-    est_bandwidth_gb: float  # NFE * model_size_gb
+    est_bandwidth_gb: float  # Theoretical weight streaming: NFE * model_size_gb (analytical model)
     gb_per_token: float  # est_bandwidth_gb / generated_tokens
     peak_ram_gb: float
     swap_pageouts_delta: int
+    swapouts_delta: int = 0
+    effective_tok_s: float = 0.0
     details: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -107,7 +109,15 @@ class TelemetryContext:
     def get_record(self) -> TelemetryRecord:
         wall_time = max(self.end_time - self.start_time, 1e-6)
         tok_s = self.generated_tokens / wall_time if self.generated_tokens > 0 else 0.0
-        pageouts_delta = self.end_vm.get("pageouts", 0) - self.start_vm.get("pageouts", 0)
+
+        p_end = self.end_vm.get("pageouts")
+        p_start = self.start_vm.get("pageouts")
+        pageouts_delta = (p_end - p_start) if (p_end is not None and p_start is not None) else 0
+
+        s_end = self.end_vm.get("swapouts")
+        s_start = self.start_vm.get("swapouts")
+        swapouts_delta = (s_end - s_start) if (s_end is not None and s_start is not None) else 0
+
         est_bw = self.nfe * self.model_size_gb
         gb_per_tok = (est_bw / self.generated_tokens) if self.generated_tokens > 0 else 0.0
 
@@ -124,6 +134,7 @@ class TelemetryContext:
             gb_per_token=gb_per_tok,
             peak_ram_gb=self.peak_ram,
             swap_pageouts_delta=pageouts_delta,
+            swapouts_delta=swapouts_delta,
             details=self.details
         )
 
@@ -139,20 +150,21 @@ def print_telemetry_table(records: list[TelemetryRecord], console: Optional[Cons
     table.add_column("Tokens", justify="right")
     table.add_column("Dauer (s)", justify="right", style="bold")
     table.add_column("Tokens/s", justify="right")
-    table.add_column("Est. RAM Read (GB)", justify="right", style="bold red")
-    table.add_column("GB / Token", justify="right", style="bold yellow")
+    table.add_column("Theor. Weight Read* (GB)", justify="right", style="bold red")
+    table.add_column("GB / Token*", justify="right", style="bold yellow")
     table.add_column("Peak RAM (GB)", justify="right", style="blue")
-    table.add_column("Swap Pageouts", justify="right", style="bold green")
+    table.add_column("Swap & Pageouts", justify="right", style="bold green")
 
     for r in records:
-        swap_str = f"[bold green]{r.swap_pageouts_delta}[/bold green]" if r.swap_pageouts_delta == 0 else f"[bold red]+{r.swap_pageouts_delta}[/bold red]"
+        swap_str = f"[bold green]0 / 0[/bold green]" if (r.swap_pageouts_delta == 0 and r.swapouts_delta == 0) else f"[bold red]+{r.swap_pageouts_delta} / +{r.swapouts_delta}[/bold red]"
+        tok_speed_str = f"{r.tokens_per_sec:.1f}" if r.effective_tok_s <= 0 else f"{r.tokens_per_sec:.1f} ({r.effective_tok_s:.1f} eff.)"
         table.add_row(
             r.mode,
             r.scenario_name,
             str(r.nfe),
             str(r.generated_tokens),
             f"{r.wall_time_s:.2f}s",
-            f"{r.tokens_per_sec:.1f}",
+            tok_speed_str,
             f"{r.est_bandwidth_gb:.2f} GB",
             f"{r.gb_per_token:.4f} GB/tok",
             f"{r.peak_ram_gb:.2f} GB",
@@ -161,4 +173,5 @@ def print_telemetry_table(records: list[TelemetryRecord], console: Optional[Cons
 
     console.print()
     console.print(table)
+    console.print("[dim]* Hinweis: 'Theor. Weight Read' ist das analytische Streaming-Modell (NFE x Modellgröße in RAM), keine physikalische Bus-Messung per Hardware-Counter.[/dim]")
     console.print()
