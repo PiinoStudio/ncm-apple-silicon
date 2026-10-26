@@ -20,8 +20,8 @@ Unsere empirische Untersuchung auf echter Hardware (Apple Silicon M5 Pro) entlar
 ├─────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ 2. DIE DESILLUSIONIERUNG GEGENÜBER OPTIMIERTEN AR-BASELINES (Apple MLX 4-Bit Metal)            │
 │ • Systems-Optimierungen (Prefix-KV, GPU-Matrix-Interp, Single-Pass Decode) beschleunigen NCM    │
-│   von 73.7 auf 310.1 BPE tok/s (1.84x schneller als PyTorch MPS FP16 mit 168.5 tok/s).          │
-│ • ABER: Ein optimiertes 4-Bit AR-Modell unter Apple MLX erreicht bereits 345.1 tok/s!           │
+│   von 68.3 auf 288.9 BPE tok/s (End-to-End N=500) bzw. 310.4 tok/s (Burst powermetrics).        │
+│ • ABER: Ein optimiertes 4-Bit AR-Modell unter Apple MLX erreicht 332.1 bzw. 345.1 tok/s!        │
 │ • Für kleine Modelle (<1B) existiert auf 24-GB-Macs gar kein Speichernotstand; 4-Bit-AR passt   │
 │   bereits vollständig in schnelle Cache-Hierarchien und decodiert schneller als NCM.            │
 ├─────────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -67,14 +67,21 @@ ncm-m5pro-poc/
 ### 1. Statistische Qualitätsevaluation (XSum, Großstichprobe $N = 500$)
 > **Versuchsaufbau:** 500 BBC-Nachrichtenartikel aus `data/xsum/passages.pickle` wurden im Paired-Design gegen die offiziellen Referenzen (`reference_summaries.pickle`) evaluiert. Signifikanzprüfung via **Paired Bootstrap mit 10.000 Resamples**. Hardware: Apple Silicon M5 Pro (14-Core CPU, 20-Core GPU, 24 GB Unified Memory, 273 GB/s Speicherbandbreite).
 
-| Modell / Architektur | Backend / Optimierung | Passes (NFE) | Inferenzdauer / Sample | Durchsatz (BPE) | ROUGE-1 | ROUGE-2 | ROUGE-L |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Qwen2.5-0.5B (AR Baseline)** | PyTorch MPS (FP16, Zero-Shot) | 48 | 184.7 ms | 168.5 tok/s | 0.2227 &plusmn; 0.101 | 0.0462 &plusmn; 0.064 | 0.1678 &plusmn; 0.081 |
-| **Qwen2.5-0.5B (AR MLX 4-bit)**| Apple MLX (Metal, 4-Bit) | 48 | 139.1 ms | **345.1 tok/s** | 0.2231 &plusmn; 0.082 | 0.0481 &plusmn; 0.046 | 0.1604 &plusmn; 0.056 |
-| **NCM Fast (Naive Eager Port)**| PyTorch MPS (Eager, FP16) | 9 | 380.0 ms | 73.7 tok/s | 0.3442 &plusmn; 0.142 | 0.1292 &plusmn; 0.125 | 0.2759 &plusmn; 0.134 |
-| **NCM Fast (Systems-Optimized)**| PyTorch MPS (Prefix-KV, FP16)| **9** | **89.8 ms** | 310.1 tok/s | **0.3442 &plusmn; 0.142** | **0.1292 &plusmn; 0.125** | **0.2759 &plusmn; 0.134** |
-| **Hybrid (NCM + MLX 4-Bit)**   | 16b MPS + 4b Metal | 137 | 3.39 s | 51.9 tok/s | 0.1824 &plusmn; 0.065 | 0.0448 &plusmn; 0.048 | 0.1308 &plusmn; 0.039 |
-| *Signifikanz (NCM vs. AR)* | *Paired Bootstrap (10k, N=500)*| - | - | - | **&Delta; = +0.121 (p < 0.0001)** | **&Delta; = +0.083 (p < 0.0001)** | **&Delta; = +0.108 (p < 0.0001)** |
+| Modell / Architektur | Backend / Optimierung | Passes (NFE) | Ø BPE-Tokens | Gemessene Dauer | Iso-Latenz (28 Tok)* | BPE Durchsatz | ROUGE-1 | ROUGE-2 | ROUGE-L |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Qwen2.5-0.5B (AR Baseline)** | PyTorch MPS (FP16, Zero-Shot) | 48 | 28.1 | 178.4 ms | 177.8 ms | 157.5 tok/s | 0.2227 &plusmn; 0.101 | 0.0462 &plusmn; 0.064 | 0.1678 &plusmn; 0.081 |
+| **Qwen2.5-0.5B (AR MLX 4-bit)**| Apple MLX (Metal, 4-Bit) | 48 | 35.4 | 106.7 ms | **84.3 ms** | **332.1 tok/s** | 0.2283 &plusmn; 0.088 | 0.0424 &plusmn; 0.054 | 0.1664 &plusmn; 0.069 |
+| **NCM Fast (Naive Eager Port)**| PyTorch MPS (Eager, FP16) | 9 | 25.9 | 380.0 ms | 410.0 ms | 68.3 tok/s | 0.3442 &plusmn; 0.142 | 0.1292 &plusmn; 0.125 | 0.2759 &plusmn; 0.134 |
+| **NCM Fast (Systems-Optimized)**| PyTorch MPS (Prefix-KV, FP16)| **9** | 25.9 | **89.8 ms** | 96.9 ms | 288.9 tok/s | **0.3442 &plusmn; 0.142** | **0.1292 &plusmn; 0.125** | **0.2759 &plusmn; 0.134** |
+| **Hybrid (NCM + MLX 4-Bit)\***  | 16b MPS + 4b Metal | 137 | 176.0 | 3.39 s | - | 51.9 tok/s | 0.1824 &plusmn; 0.065 | 0.0448 &plusmn; 0.048 | 0.1308 &plusmn; 0.039 |
+| *Signifikanz (NCM vs. AR Base)*| *Paired Bootstrap (10k, N=500)*| - | - | - | - | - | **&Delta; = +0.121 (p < 0.0001)** | **&Delta; = +0.083 (p < 0.0001)** | **&Delta; = +0.108 (p < 0.0001)** |
+| *Signifikanz (NCM vs. MLX 4b)* | *Paired Bootstrap (10k, N=500)*| - | - | - | - | - | **&Delta; = +0.116 (p < 0.0001)** | **&Delta; = +0.087 (p < 0.0001)** | **&Delta; = +0.110 (p < 0.0001)** |
+
+> \* **Methodische Hinweise zu Tabelle 1:**  
+> 1. **Invariante A (Tokens / Dauer = Durchsatz):** Der gemessene Durchsatz erfüllt in jeder Zeile strikt $\text{BPE-Tokens} / \text{Dauer} = \text{Durchsatz}$ (z. B. 28.1 tok / 0.1784 s = 157.5 tok/s; 35.44 tok / 0.1067 s = 332.1 tok/s; 25.94 tok / 0.0898 s = 288.9 tok/s).
+> 2. **Iso-Token Latenz-Normalisierung:** Da die Modelle unterschiedlich lange Zusammenfassungen erzeugen (MLX erzeugt im Schnitt 35.4 Tokens vs. NCM 25.9 Tokens aus 48 Hierarchie-Positionen), normiert die Spalte *Iso-Latenz* auf eine einheitliche Ausgabelänge von exakt 28.0 BPE-Tokens ($28.0 / \text{Durchsatz}$). MLX 4-Bit benötigt für 28 Tokens nur **84.3 ms** (vs. 96.9 ms für NCM Fast).
+> 3. **Stichproben-Kennzeichnung ($N=500$ vs. $N=20$):** AR Baseline, MLX 4-Bit und NCM Fast wurden vollständig über die gesamte Stichprobe $N = 500$ evaluiert. Die Hybrid-Pipeline wurde aufgrund der hohen Laufzeit (3.39s/Sample) auf einem repräsentativen Subset von **$N = 20$ Samples** evaluiert.
+> 4. **Steady-State vs. Burst-Durchsatz:** Der BPE-Durchsatz in Tabelle 1 (288.9 tok/s NCM, 332.1 tok/s MLX) spiegelt die reale End-to-End Inferenz pro Sample über 500 diskrete Aufrufe wider. Der in Tabelle 3 für `powermetrics` gemessene Durchsatz (310.4 tok/s NCM, 345.1 tok/s MLX) stammt aus kontinuierlichem Hardware-Streaming im Burst-Regime (ohne Loop- und Decodierungs-Overhead).
 
 > ⚠️ **METHODISCHE EINSCHRÄNKUNG (Task-Spezialisierungs-Confounder):**  
 > Der NCM-Checkpoint von Stanford wurde gezielt auf dem XSum-Trainingsdatensatz fine-tuned. Qwen2.5-0.5B hingegen wurde im **Zero-Shot-Verfahren** evaluiert. Die statistisch hochsignifikanten ROUGE-Vorteile ($p < 0.0001$) spiegeln die **aufgabenspezifische Spezialisierung** wider und beweisen keine generische architektonische Überlegenheit.
@@ -101,37 +108,42 @@ ncm-m5pro-poc/
 
 | Modell / Konfiguration | BPE Tokens | Dauer (s) | BPE Durchsatz | Ø SoC Power | Dyn. Power | Total Energy (J) | J / BPE (Total) | J / BPE (Dyn) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Qwen2.5-0.5B (MLX 4-Bit Metal)** | 2.250 | 6.52s | **345.1 tok/s** | 25.81 W | 24.21 W | 168.29 J | 0.0748 J/tok | 0.0702 J/tok |
-| **Qwen2.5-0.5B (PyTorch MPS FP16)**| 960 | 5.70s | 168.5 tok/s | 19.19 W | 17.59 W | 109.28 J | 0.1138 J/tok | 0.1044 J/tok |
-| **NCM Fast (Systems-Optimized)**    | 1.679 | 5.41s | 310.1 tok/s | 19.86 W | 18.27 W | 107.55 J | **0.0641 J/tok** | **0.0589 J/tok** |
+| **Qwen2.5-0.5B (MLX 4-Bit Metal)** | 2.250 | 6.52s | **345.1 tok/s** | 25.81 W | 24.22 W | 168.28 J | 0.0748 J/tok | 0.0702 J/tok |
+| **Qwen2.5-0.5B (PyTorch MPS FP16)**| 960 | 5.70s | 168.4 tok/s | 19.19 W | 17.60 W | 109.38 J | 0.1139 J/tok | 0.1045 J/tok |
+| **NCM Fast (Systems-Optimized)**    | 1.679 | 5.41s | 310.4 tok/s | 19.86 W | 18.27 W | 107.44 J | **0.0640 J/tok** | **0.0589 J/tok** |
 
 #### 🔬 Wichtige Erkenntnisse des Iso-Token Hardware-Vergleichs:
 1. **Iso-Token Latenz- und Durchsatz-Realität:**
-   - Im Vergleich zur unoptimierten **PyTorch MPS FP16 Baseline** (168.5 tok/s) ist NCM Fast (310.1 tok/s) um **$1.84\times$ schneller** und verbraucht **$43.7\,\%$ weniger Energie pro Token** (0.0641 J vs 0.1138 J).
-   - Im Vergleich zur hochoptimierten **Apple MLX 4-Bit Metal Baseline** (345.1 tok/s) ist NCM im Durchsatz **leicht langsamer (-10 %)**, verbraucht jedoch **$14.3\,\%$ weniger Energie pro Token** (0.0641 J vs 0.0748 J), da MLX bei voller GPU-Auslastung 25.81 W zieht.
+   - Im Vergleich zur unoptimierten **PyTorch MPS FP16 Baseline** (168.4 tok/s) ist NCM Fast (310.4 tok/s) um **$1.84\times$ schneller** und verbraucht **$43.8\,\%$ weniger Energie pro Token** (0.0640 J vs 0.1139 J).
+   - Im Vergleich zur hochoptimierten **Apple MLX 4-Bit Metal Baseline** (345.1 tok/s) ist NCM im Durchsatz **leicht langsamer (-10 %)**, verbraucht jedoch **$14.4\,\%$ weniger Energie pro Token** (0.0640 J vs 0.0748 J), da MLX bei voller GPU-Auslastung 25.81 W zieht.
 2. **Korrektur der früheren Latenz-Behauptung:**
    Ein direkter Vergleich von Wanduhrzeiten ohne BPE-Normalisierung (z. B. 0.58s für 139 BPE-Tokens vs. 1.62s für 240 Tokens) war methodisch unzulässig. Auf Iso-BPE-Token-Basis beträgt der reale Geschwindigkeitsvorteil gegenüber unoptimiertem PyTorch MPS **$1.84\times$** (nicht 2.79x).
 
 ---
 
-### 4. Einzelfall-Ablation: MBR-Kandidaten-Skalierung (Sample #0)
-> Untersuchung von Test-Time Scaling via Minimum Bayes Risk (MBR) Konsensentscheidung ($K = 1, 4, 8$) auf dem ersten XSum-Referenzartikel (`passages[0]`).
+### 4. Statistische MBR-Kandidaten-Skalierung (Ablation über $N = 20$ Samples)
+> Untersuchung von Test-Time Scaling via Minimum Bayes Risk (MBR) Konsensentscheidung ($K = 1, 4, 8$) gemittelt über **20 repräsentative XSum-Artikel** (`passages[0:20]`).
 
-| Kandidaten ($K$) | Passes (NFE) | Dauer (s) | Effektiver Durchsatz | ROUGE-1 | ROUGE-2 | ROUGE-L | MBR Utility Score* |
+| Kandidaten ($K$) | Passes (NFE) | Dauer / Sample | Effektiver BPE Durchsatz | ROUGE-1 | ROUGE-2 | ROUGE-L | MBR Utility Score* |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1 (Fast)** | **9** | **0.09s** | **310.1 BPE tok/s** | 0.279 | **0.049** | **0.233** | - |
-| **4 (Low Effort)** | 36 | 0.42s | 68.2 BPE tok/s | 0.279 | **0.049** | **0.233** | 0.474 |
-| **8 (Medium Effort)**| 72 | 0.85s | 34.1 BPE tok/s | **0.356** (+27%) | 0.047 (-4%) | 0.222 (-5%) | **0.478** |
+| **1 (Fast)** | **9** | **0.098s** | **285.4 tok/s** | **0.3509 &plusmn; 0.144** | **0.1218 &plusmn; 0.119** | **0.2706 &plusmn; 0.137** | - |
+| **4 (Low Effort)** | 36 | 0.454s | 61.6 tok/s | 0.3452 &plusmn; 0.154 | 0.1197 &plusmn; 0.115 | 0.2613 &plusmn; 0.147 | 0.4292 |
+| **8 (Medium Effort)**| 72 | 0.897s | 31.2 tok/s | 0.3466 &plusmn; 0.150 | 0.1205 &plusmn; 0.129 | 0.2686 &plusmn; 0.138 | **0.4339** |
 
-* **Warum identische ROUGE-Werte bei K=1 und K=4 auf Sample #0?** Bei $K=4$ wählt die MBR-Konsensberechnung (ROUGE-L Utility) den dominanten Medoid-Kandidaten (#0) aus, der aufgrund der konservativen Basistemperatur ($T=0.70$) identisch mit dem Greedy-Kandidaten bei $K=1$ ist. Erst bei $K=8$ mit breiterer Temperaturspreizung setzt sich ein diverserer Kandidat durch.
-* **Laufzeitskalierung:** Der MBR-Konsens berechnet die paarweise ROUGE-L-Ähnlichkeit aller $K(K-1)/2$ Kandidatenpaare sequentiell auf der CPU, was den leichten quadratischen Overhead von 0.09s auf 0.42s und 0.85s erklärt.
+* **Methodik & Sampling-Konfiguration:**
+  - Kandidat #0 wird stets deterministisch als Greedy-Anker ($T=0.7$, `top_k=1`, `top_p=0`) generiert.
+  - Ab Kandidat $k \ge 1$ explorieren die Passes den Konzept-Raum mit ansteigender Temperatur ($T=0.85 \dots 1.15$) und Nucleus-Sampling (`top_p=0.90..0.98`, `top_k=50`).
+* **Empirischer Befund auf Text-Summarization:**
+  - Im Gegensatz zu diskreten Planungsaufgaben (Sudoku) bringt MBR-Konsens auf XSum **keine statistisch signifikante ROUGE-Verbesserung** gegenüber dem schnellen Greedy-Pass ($K=1$).
+  - Obwohl der paarweise ROUGE-L Konsens (MBR Utility) von 0.4292 auf 0.4339 ansteigt, verbleiben die ROUGE-1/2/L Scores im Rahmen der statistischen Fehlertoleranz.
+  - Der $4.6\times$ bis $9.2\times$ höhere Rechenaufwand (0.098s $\to$ 0.454s $\to$ 0.897s) führt zu einem Einbruch des effektiven Durchsatzes auf 31.2 BPE tok/s und rechtfertigt Test-Time-Compute für summarische Aufgaben nicht.
 
 ---
 
 ### 5. Die 2-Stufen Hybrid-Pipeline: Ein empirisches Negativergebnis
 Die Hybrid-Pipeline kombiniert NCM mit Apple MLX (9 Passes NCM auf MPS + 128 Passes MLX Qwen2.5-4bit):
-* **Empirische Ergebnisse ($N=500$):** Durchsatz: 51.9 tok/s (137 Passes), ROUGE-1: 0.1824, ROUGE-2: 0.0448, ROUGE-L: 0.1308.
-* **Ungeschminkte Einordnung:** Die 2-Stufen-Pipeline ist ein **klares Negativergebnis**. Sie ist langsamer als reines NCM und reines MLX und erzielt die schlechtesten ROUGE-Werte aller Varianten. Ein unverbundenes semantisches Drafting ohne gemeinsames Feintuning führt zu stilistischer Reibung zwischen den Modellen.
+* **Empirische Ergebnisse ($N=20$ Subset):** Durchsatz: 51.9 tok/s (137 Passes, 176.0 BPE-Tokens in 3.39s), ROUGE-1: 0.1824 &plusmn; 0.065, ROUGE-2: 0.0448 &plusmn; 0.048, ROUGE-L: 0.1308 &plusmn; 0.039.
+* **Ungeschminkte Einordnung:** Die 2-Stufen-Pipeline ist ein **klares Negativergebnis** (aufgrund der hohen Latenz von 3.39 s/Sample auf $N = 20$ evaluiert). Sie ist langsamer als reines NCM und reines MLX und erzielt die schlechtesten ROUGE-Werte aller Varianten. Ein unverbundenes semantisches Drafting ohne gemeinsames Feintuning führt zu stilistischer Reibung zwischen den Modellen.
 
 ---
 
